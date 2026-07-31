@@ -1,0 +1,23 @@
+[project]
+name = "icecream-formula-lab"
+version = "0.1.0"
+description = "A science-based ice cream formulation dashboard for Ninja Creami and churned bases."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "shiny>=1.7.0",
+    "shinylive>=0.8.11",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
