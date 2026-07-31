@@ -7,6 +7,7 @@ testable and compatible with Shinylive's browser-side Python runtime.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from math import isfinite
 from typing import Any
 
 COMPONENT_FACTORS: dict[str, tuple[float, float]] = {
@@ -29,7 +30,7 @@ COMPONENT_FACTORS: dict[str, tuple[float, float]] = {
     "alcohol": (0.0, 740.0),
 }
 
-ADDED_SUGAR_COMPONENTS = {
+SUGAR_COMPONENTS = {
     "sucrose",
     "dextrose",
     "fructose",
@@ -44,9 +45,10 @@ ADDED_SUGAR_COMPONENTS = {
 
 NONFAT_SOLID_COMPONENTS = {
     "msnf",
-    *ADDED_SUGAR_COMPONENTS,
+    *SUGAR_COMPONENTS,
     "maltodextrin_15de",
     "inulin",
+    "fiber",
     "other_solids",
     "salt",
     "gums",
@@ -87,6 +89,29 @@ BASE_PRESET_INFO = {
         "name": "Cooked custard · whole eggs",
         "description": "A lighter egg custard with 8% whole egg in the starting formula.",
         "process": "Temper the eggs, cook gently, cool quickly, age, then freeze.",
+    },
+    "strawberry_sorbet": {
+        "name": "Strawberry sorbet",
+        "description": (
+            "Underbelly's high-fruit, lower-sweetness formula, recomputed here with the "
+            "calculator's USDA strawberry reference."
+        ),
+        "process": "Blend, rest cold, then freeze. Replace the fruit data for the actual Brix.",
+    },
+}
+
+TARGET_PROFILE_INFO = {
+    "Creami / Pacojet": {
+        "name": "Ice cream · CREAMi or Pacojet",
+        "product_style": "ice_cream",
+    },
+    "Churned machine": {
+        "name": "Ice cream · churned machine",
+        "product_style": "ice_cream",
+    },
+    "Fruit sorbet · experimental": {
+        "name": "Fruit sorbet · experimental",
+        "product_style": "sorbet",
     },
 }
 
@@ -170,13 +195,26 @@ class RecipeLine:
 
 @dataclass(frozen=True)
 class Targets:
-    """Exactly determined targets for the five-variable inverse solver."""
+    """Selected formulation targets for recipe optimization.
+
+    ``total_mass`` is always enforced. A composition target is included only when
+    its value is not ``None``.
+    """
 
     total_mass: float
-    fat_pct: float
-    msnf_pct: float
-    pod: float
-    pac: float
+    fat_pct: float | None = None
+    msnf_pct: float | None = None
+    total_solids_pct: float | None = None
+    pod: float | None = None
+    pac: float | None = None
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    """Optimized recipe and remaining differences from the selected targets."""
+
+    lines: list[RecipeLine]
+    target_errors: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -186,10 +224,11 @@ class Metrics:
     total_mass: float = 0.0
     fat_pct: float = 0.0
     msnf_pct: float = 0.0
-    added_sugars_pct: float = 0.0
+    modeled_sugars_pct: float = 0.0
     nonfat_solids_pct: float = 0.0
     total_solids_pct: float = 0.0
     water_pct: float = 0.0
+    fiber_pct: float = 0.0
     gums_pct: float = 0.0
     pod: float = 0.0
     pac: float = 0.0
@@ -200,9 +239,15 @@ class Metrics:
     component_grams: dict[str, float] = field(default_factory=dict)
     sugar_grams: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def added_sugars_pct(self) -> float:
+        """Return the legacy sugar metric name for compatibility."""
+
+        return self.modeled_sugars_pct
+
 
 class FormulationError(ValueError):
-    """Raised when an inverse formulation target cannot be solved safely."""
+    """Raised when a formulation cannot be optimized safely."""
 
 
 def _cream_components(fat_pct: float) -> dict[str, float]:
@@ -226,6 +271,7 @@ def default_library() -> dict[str, Ingredient]:
     """
 
     ingredients = [
+        Ingredient("water", "Water", "Water & fruit", {"water": 100.0}),
         Ingredient(
             "whole_milk_35",
             "Whole milk · 3.5% fat",
@@ -295,6 +341,12 @@ def default_library() -> dict[str, Ingredient]:
             "Maltodextrin · 15DE",
             "Bulking solid",
             _pure("maltodextrin_15de"),
+        ),
+        Ingredient(
+            "atomized_glucose_40de",
+            "Atomized glucose · 40DE",
+            "Sweetener",
+            _pure("atomized_glucose_40de"),
         ),
         Ingredient("trehalose", "Trehalose", "Sweetener", _pure("trehalose")),
         Ingredient("erythritol", "Erythritol", "Sweetener", _pure("erythritol")),
@@ -366,16 +418,55 @@ def default_library() -> dict[str, Ingredient]:
             "Not equivalent to gelling gelatin. Performance depends on peptide size and product.",
         ),
         Ingredient(
+            "strawberry_puree",
+            "Strawberry purée · unsweetened reference",
+            "Fruit & purée",
+            {
+                "fat": 0.22,
+                "sucrose": 0.00,
+                "dextrose": 2.24,
+                "fructose": 2.62,
+                "other_solids": 4.12,
+                "water": 90.80,
+            },
+            "USDA Foundation Foods April 2026 mean for raw strawberries (FDC 2346409). "
+            "The record has no fiber value, so fiber remains inside residual other solids. "
+            "Cultivar, ripeness, processing, and Brix can materially change a real purée.",
+        ),
+        Ingredient(
+            "mango_puree",
+            "Mango purée · unsweetened reference",
+            "Fruit & purée",
+            {
+                "fat": 0.38,
+                "sucrose": 6.97,
+                "dextrose": 2.01,
+                "fructose": 4.68,
+                "fiber": 1.60,
+                "other_solids": 0.90,
+                "water": 83.46,
+            },
+            "USDA reference composition for raw mango. Cultivar, ripeness, processing, "
+            "and measured Brix can materially change a real purée.",
+        ),
+        Ingredient(
             "cocoa_powder",
-            "Cocoa powder · approximate",
-            "Flavor",
-            {"fat": 22.0, "other_solids": 73.0, "water": 5.0},
-            "Approximation only; replace with the package values for precise work.",
+            "Cocoa powder · unsweetened reference",
+            "Chocolate & cocoa",
+            {
+                "fat": 13.70,
+                "sucrose": 1.75,
+                "fiber": 37.00,
+                "other_solids": 44.55,
+                "water": 3.00,
+            },
+            "USDA reference for unsweetened cocoa powder. Fat and fiber vary widely by "
+            "brand and cocoa treatment; use the package values for precise work.",
         ),
         Ingredient(
             "dark_chocolate_70",
             "Dark chocolate · 70% approximate",
-            "Flavor",
+            "Chocolate & cocoa",
             {"fat": 43.0, "sucrose": 29.0, "other_solids": 27.0, "water": 1.0},
             "Approximation only; replace with the package values for precise work.",
         ),
@@ -425,7 +516,7 @@ def base_recipe(preset_id: str) -> list[RecipeLine]:
         preset_id: One of the keys in ``BASE_PRESET_INFO``.
 
     Returns:
-        A new recipe list whose first five rows are available to the inverse solver.
+        A new recipe list with suitable starting rows available to the optimizer.
 
     Raises:
         ValueError: If ``preset_id`` does not identify a supported base style.
@@ -469,6 +560,19 @@ def base_recipe(preset_id: str) -> list[RecipeLine]:
             RecipeLine("locust_bean_gum", 0.7),
             RecipeLine("guar", 0.4),
             RecipeLine("lambda_carrageenan", 0.3),
+        ],
+        "strawberry_sorbet": [
+            RecipeLine("strawberry_puree", 750.0, True),
+            RecipeLine("water", 51.0, True),
+            RecipeLine("dextrose", 42.0, True),
+            RecipeLine("atomized_glucose_40de", 65.0, True),
+            RecipeLine("trehalose", 40.0, True),
+            RecipeLine("erythritol", 20.0),
+            RecipeLine("inulin", 27.0),
+            RecipeLine("cmc", 2.0),
+            RecipeLine("guar", 1.0),
+            RecipeLine("lambda_carrageenan", 1.0),
+            RecipeLine("salt", 1.0),
         ],
     }
     if preset_id not in recipes:
@@ -534,12 +638,13 @@ def calculate_recipe(
     msnf_grams = component_grams.get("msnf", 0.0)
     water_grams = component_grams.get("water", 0.0)
     gums_grams = component_grams.get("gums", 0.0)
+    fiber_grams = component_grams.get("fiber", 0.0)
     sugar_grams = {
         component: component_grams.get(component, 0.0)
-        for component in ADDED_SUGAR_COMPONENTS
+        for component in SUGAR_COMPONENTS
         if component_grams.get(component, 0.0) > 0
     }
-    added_sugars_grams = sum(sugar_grams.values())
+    modeled_sugars_grams = sum(sugar_grams.values())
     nonfat_solids_grams = sum(
         component_grams.get(component, 0.0) for component in NONFAT_SOLID_COMPONENTS
     )
@@ -552,18 +657,19 @@ def calculate_recipe(
         total_mass=total_mass,
         fat_pct=fat_grams * scale,
         msnf_pct=msnf_grams * scale,
-        added_sugars_pct=added_sugars_grams * scale,
+        modeled_sugars_pct=modeled_sugars_grams * scale,
         nonfat_solids_pct=nonfat_solids_grams * scale,
         total_solids_pct=(fat_grams + nonfat_solids_grams) * scale,
         water_pct=water_pct,
+        fiber_pct=fiber_grams * scale,
         gums_pct=gums_grams * scale,
         pod=pod_absolute * 1000.0 / total_mass,
         pac=pac,
         pac_per_100g=pac / 10.0,
         absolute_pac=pac / (water_pct / 100.0) if water_pct else 0.0,
         dextrose_share_pct=(
-            100.0 * sugar_grams.get("dextrose", 0.0) / added_sugars_grams
-            if added_sugars_grams
+            100.0 * sugar_grams.get("dextrose", 0.0) / modeled_sugars_grams
+            if modeled_sugars_grams
             else 0.0
         ),
         lactose_water_pct=(100.0 * lactose_grams / water_grams if water_grams else 0.0),
@@ -572,150 +678,247 @@ def calculate_recipe(
     )
 
 
-def diagnose_recipe(metrics: Metrics, *, fat_cap: float = 15.0) -> list[str]:
+def diagnose_recipe(
+    metrics: Metrics,
+    *,
+    fat_cap: float = 15.0,
+    target_set: str = "Creami / Pacojet",
+) -> list[str]:
     """Return plain-language safety and feasibility warnings."""
 
     warnings: list[str] = []
     if metrics.total_mass <= 0:
         return ["Add at least one ingredient with a positive quantity."]
-    if metrics.fat_pct > fat_cap:
-        warnings.append(f"Fat is {metrics.fat_pct:.1f}%, above your {fat_cap:.1f}% cap.")
-    if metrics.lactose_water_pct > 10.0:
+    is_sorbet = target_set == "Fruit sorbet · experimental"
+    if not is_sorbet:
+        if metrics.fat_pct > fat_cap:
+            warnings.append(f"Fat is {metrics.fat_pct:.1f}%, above your {fat_cap:.1f}% cap.")
+        if metrics.lactose_water_pct > 10.0:
+            warnings.append(
+                "Estimated lactose exceeds 10% of the water phase; sandy lactose crystals "
+                "become more likely."
+            )
+        if metrics.dextrose_share_pct > 50.0:
+            warnings.append(
+                "Dextrose exceeds 50% of the modeled sugar blend, above Underbelly's "
+                "suggested ceiling for dairy ice cream."
+            )
+    solids_range = (25.0, 33.0) if is_sorbet else (35.0, 45.0)
+    if not solids_range[0] <= metrics.total_solids_pct <= solids_range[1]:
         warnings.append(
-            "Estimated lactose exceeds 10% of the water phase; sandy lactose crystals "
-            "become more likely."
-        )
-    if metrics.dextrose_share_pct > 50.0:
-        warnings.append(
-            "Dextrose exceeds 50% of the added-sugar blend, above Underbelly's suggested ceiling."
-        )
-    if not 35.0 <= metrics.total_solids_pct <= 45.0:
-        warnings.append(
-            f"Total solids are {metrics.total_solids_pct:.1f}%; keep them between 35% and 45%."
+            f"Total solids are {metrics.total_solids_pct:.1f}%; the active starting range "
+            f"is {solids_range[0]:g}% to {solids_range[1]:g}%."
         )
     return warnings
 
 
-def _solve_linear_system(matrix: list[list[float]], rhs: list[float]) -> list[float]:
-    """Solve a square linear system with partial-pivot Gaussian elimination."""
+_OPTIMIZATION_TOLERANCES = {
+    "fat_pct": 1.0,
+    "msnf_pct": 1.0,
+    "total_solids_pct": 2.0,
+    "pod": 5.0,
+    "pac": 5.0,
+}
 
-    size = len(rhs)
-    augmented = [row[:] + [rhs_value] for row, rhs_value in zip(matrix, rhs, strict=True)]
-    for pivot_index in range(size):
-        pivot_row = max(
-            range(pivot_index, size),
-            key=lambda row_index: abs(augmented[row_index][pivot_index]),
+
+def _project_to_simplex(values: list[float], total: float) -> list[float]:
+    """Return the closest nonnegative values whose sum is ``total``."""
+
+    if total <= 0:
+        return [0.0 for _ in values]
+    ordered = sorted(values, reverse=True)
+    running_total = 0.0
+    threshold = 0.0
+    for rank, value in enumerate(ordered, start=1):
+        running_total += value
+        candidate = (running_total - total) / rank
+        if value > candidate:
+            threshold = candidate
+    return [max(0.0, value - threshold) for value in values]
+
+
+def _ingredient_metric_coefficient(
+    ingredient: Ingredient,
+    target_name: str,
+    total_mass: float,
+) -> float:
+    """Return the normalized metric change contributed by one ingredient gram."""
+
+    if target_name == "fat_pct":
+        return ingredient.component("fat") / total_mass
+    if target_name == "msnf_pct":
+        return ingredient.component("msnf") / total_mass
+    if target_name == "total_solids_pct":
+        solids_per_100g = ingredient.component("fat") + sum(
+            ingredient.component(component) for component in NONFAT_SOLID_COMPONENTS
         )
-        pivot = augmented[pivot_row][pivot_index]
-        if abs(pivot) < 1e-10:
+        return solids_per_100g / total_mass
+    if target_name == "pod":
+        return ingredient_pod_coefficient(ingredient) * 1000.0 / total_mass
+    if target_name == "pac":
+        return ingredient_pac_coefficient(ingredient) * 1000.0 / total_mass
+    expected = ", ".join(_OPTIMIZATION_TOLERANCES)
+    raise ValueError(f"Unknown optimization target {target_name!r}; expected one of: {expected}.")
+
+
+def _selected_target_values(targets: Targets) -> dict[str, float]:
+    """Return validated composition targets selected by the caller."""
+
+    selected = {
+        name: value
+        for name in _OPTIMIZATION_TOLERANCES
+        if (value := getattr(targets, name)) is not None
+    }
+    if not selected:
+        raise FormulationError("Select at least one composition target to optimize.")
+    for name, value in selected.items():
+        if not isfinite(value) or value < 0:
             raise FormulationError(
-                "The five free ingredients do not span all five targets. Choose "
-                "ingredients with distinct fat, MSNF, POD, and PAC contributions."
+                f"Target {name} must be a finite nonnegative value; got {value!r}."
             )
-        augmented[pivot_index], augmented[pivot_row] = (
-            augmented[pivot_row],
-            augmented[pivot_index],
-        )
-        augmented[pivot_index] = [value / pivot for value in augmented[pivot_index]]
-        for row_index in range(size):
-            if row_index == pivot_index:
-                continue
-            factor = augmented[row_index][pivot_index]
-            augmented[row_index] = [
-                value - factor * pivot_value
-                for value, pivot_value in zip(
-                    augmented[row_index],
-                    augmented[pivot_index],
-                    strict=True,
-                )
-            ]
-    return [augmented[index][-1] for index in range(size)]
+    return selected
 
 
-def solve_recipe(
+def optimize_recipe(
     lines: list[RecipeLine],
     library: dict[str, Ingredient],
     targets: Targets,
-) -> list[RecipeLine]:
-    """Solve five free quantities against mass, fat, MSNF, POD, and PAC targets.
+) -> OptimizationResult:
+    """Optimize selected ingredient quantities against selected formulation targets.
 
     Args:
-        lines: Current formula. Exactly five rows must have ``free=True``.
+        lines: Current formula. Rows with ``free=True`` may be changed.
         library: Ingredients keyed by stable ID.
-        targets: Desired normalized formulation targets.
+        targets: Desired batch mass and optional composition targets.
 
     Returns:
-        A new list with the five free quantities replaced by solved values.
+        Optimized nonnegative quantities and signed target errors.
 
     Raises:
-        FormulationError: If the system is not exactly determined, is singular,
-            or needs a negative ingredient amount.
+        FormulationError: If there are no adjustable rows or selected targets, or
+            the locked rows already exceed the requested batch mass.
     """
 
     free_indices = [index for index, line in enumerate(lines) if line.free]
-    if len(free_indices) != 5:
-        raise FormulationError(f"Select exactly five free rows; {len(free_indices)} are selected.")
-    if targets.total_mass <= 0:
-        raise FormulationError(f"Target mass must be positive; got {targets.total_mass!r}.")
-
-    locked_lines = [line for line in lines if not line.free]
-    locked_metrics = _absolute_totals(locked_lines, library)
-    target_absolute = [
-        targets.total_mass,
-        targets.total_mass * targets.fat_pct / 100.0,
-        targets.total_mass * targets.msnf_pct / 100.0,
-        targets.total_mass * targets.pod / 1000.0,
-        targets.total_mass * targets.pac / 1000.0,
-    ]
-    rhs = [target - locked for target, locked in zip(target_absolute, locked_metrics, strict=True)]
-
-    free_ingredients = [library[lines[index].ingredient_id] for index in free_indices]
-    matrix = [
-        [1.0 for _ in free_ingredients],
-        [ingredient.component("fat") / 100.0 for ingredient in free_ingredients],
-        [ingredient.component("msnf") / 100.0 for ingredient in free_ingredients],
-        [ingredient_pod_coefficient(ingredient) for ingredient in free_ingredients],
-        [ingredient_pac_coefficient(ingredient) for ingredient in free_ingredients],
-    ]
-    solution = _solve_linear_system(matrix, rhs)
-    negative = [
-        (free_ingredients[index].name, value)
-        for index, value in enumerate(solution)
-        if value < -1e-6
-    ]
-    if negative:
-        name, value = min(negative, key=lambda item: item[1])
+    if not free_indices:
+        raise FormulationError("Select at least one ingredient row for auto-adjustment.")
+    if not isfinite(targets.total_mass) or targets.total_mass <= 0:
         raise FormulationError(
-            f"Those targets require {value:.1f} g of {name}. Relax a target or "
-            "choose a different set of free ingredients."
+            f"Target mass must be a finite positive value; got {targets.total_mass!r}."
+        )
+    selected_targets = _selected_target_values(targets)
+    unknown = [line.ingredient_id for line in lines if line.ingredient_id not in library]
+    if unknown:
+        raise ValueError(f"Unknown ingredient: {unknown[0]!r}")
+    invalid_lines = [
+        (line.ingredient_id, line.grams)
+        for line in lines
+        if not isfinite(line.grams) or line.grams < 0
+    ]
+    if invalid_lines:
+        ingredient_id, grams = invalid_lines[0]
+        raise FormulationError(
+            f"Ingredient {ingredient_id!r} must have a finite nonnegative quantity; got {grams!r}."
         )
 
+    locked_mass = sum(line.grams for line in lines if not line.free)
+    free_mass = targets.total_mass - locked_mass
+    if free_mass < -1e-8:
+        raise FormulationError(
+            f"Locked rows already total {locked_mass:.1f} g, above the "
+            f"{targets.total_mass:.1f} g batch target."
+        )
+    free_mass = max(0.0, free_mass)
+    free_ingredients = [library[lines[index].ingredient_id] for index in free_indices]
+    locked_lines = [line for line in lines if not line.free]
+    target_rows = [
+        [
+            _ingredient_metric_coefficient(ingredient, name, targets.total_mass)
+            / _OPTIMIZATION_TOLERANCES[name]
+            for ingredient in free_ingredients
+        ]
+        for name in selected_targets
+    ]
+    locked_contributions = {
+        name: sum(
+            line.grams
+            * _ingredient_metric_coefficient(
+                library[line.ingredient_id],
+                name,
+                targets.total_mass,
+            )
+            for line in locked_lines
+        )
+        for name in selected_targets
+    }
+    scaled_rhs = [
+        (target - locked_contributions[name]) / _OPTIMIZATION_TOLERANCES[name]
+        for name, target in selected_targets.items()
+    ]
+
+    quantities = _project_to_simplex(
+        [max(0.0, lines[index].grams) for index in free_indices],
+        free_mass,
+    )
+    accelerated = quantities[:]
+    momentum = 1.0
+    lipschitz = 2.0 * sum(
+        sum(coefficient * coefficient for coefficient in row) for row in target_rows
+    )
+    if lipschitz > 0:
+        step = 1.0 / lipschitz
+        for _ in range(20_000):
+            residuals = [
+                sum(
+                    coefficient * value for coefficient, value in zip(row, accelerated, strict=True)
+                )
+                - rhs
+                for row, rhs in zip(target_rows, scaled_rhs, strict=True)
+            ]
+            gradient = [
+                2.0
+                * sum(
+                    row[column] * residual
+                    for row, residual in zip(target_rows, residuals, strict=True)
+                )
+                for column in range(len(free_indices))
+            ]
+            updated = _project_to_simplex(
+                [
+                    value - step * derivative
+                    for value, derivative in zip(accelerated, gradient, strict=True)
+                ],
+                free_mass,
+            )
+            if (
+                max(
+                    abs(value - previous)
+                    for value, previous in zip(updated, quantities, strict=True)
+                )
+                < 1e-9
+            ):
+                quantities = updated
+                break
+            next_momentum = (1.0 + (1.0 + 4.0 * momentum * momentum) ** 0.5) / 2.0
+            accelerated = [
+                value + (momentum - 1.0) / next_momentum * (value - previous)
+                for value, previous in zip(updated, quantities, strict=True)
+            ]
+            quantities = updated
+            momentum = next_momentum
+
     result = lines[:]
-    for index, solved_grams in zip(free_indices, solution, strict=True):
+    for index, solved_grams in zip(free_indices, quantities, strict=True):
         result[index] = RecipeLine(
             ingredient_id=result[index].ingredient_id,
             grams=max(0.0, solved_grams),
             free=True,
         )
-    return result
-
-
-def _absolute_totals(
-    lines: list[RecipeLine],
-    library: dict[str, Ingredient],
-) -> list[float]:
-    """Return mass, fat, MSNF, POD, and PAC contributions without normalization."""
-
-    mass = sum(line.grams for line in lines)
-    fat = sum(line.grams * library[line.ingredient_id].component("fat") / 100.0 for line in lines)
-    msnf = sum(line.grams * library[line.ingredient_id].component("msnf") / 100.0 for line in lines)
-    pod = sum(
-        line.grams * ingredient_pod_coefficient(library[line.ingredient_id]) for line in lines
-    )
-    pac = sum(
-        line.grams * ingredient_pac_coefficient(library[line.ingredient_id]) for line in lines
-    )
-    return [mass, fat, msnf, pod, pac]
+    metrics = calculate_recipe(result, library)
+    target_errors = {
+        name: getattr(metrics, name) - target for name, target in selected_targets.items()
+    }
+    return OptimizationResult(lines=result, target_errors=target_errors)
 
 
 def scale_recipe(lines: list[RecipeLine], target_mass: float) -> list[RecipeLine]:
@@ -742,6 +945,7 @@ def ingredient_from_nutrition_label(
     salt: float,
     water: float,
     sugar_component: str = "sucrose",
+    category: str = "Custom",
 ) -> Ingredient:
     """Create a custom ingredient from European-style per-100 g label values.
 
@@ -776,8 +980,8 @@ def ingredient_from_nutrition_label(
     if not name.strip():
         raise ValueError("Custom ingredient name cannot be blank.")
 
-    other_solids = carbohydrate - sugars + protein + fibre
-    declared_without_water = fat + sugars + other_solids + salt
+    other_solids = carbohydrate - sugars + protein
+    declared_without_water = fat + sugars + fibre + other_solids + salt
     resolved_water = 100.0 - declared_without_water if water == 0 else water
     total = declared_without_water + resolved_water
     if total > 100.5:
@@ -789,10 +993,11 @@ def ingredient_from_nutrition_label(
     return Ingredient(
         ingredient_id=ingredient_id,
         name=name.strip(),
-        category="Custom",
+        category=category,
         components={
             "fat": fat,
             sugar_component: sugars,
+            "fiber": fibre,
             "other_solids": other_solids,
             "salt": salt,
             "water": resolved_water,
@@ -800,6 +1005,82 @@ def ingredient_from_nutrition_label(
         note=(
             "Mapped from a nutrition label. Carbohydrate excludes fibre. Label sugars "
             f"are treated as {SOLUBLE_COMPONENT_LABELS[sugar_component].lower()}."
+        ),
+        custom=True,
+    )
+
+
+def ingredient_from_fruit_composition(
+    *,
+    ingredient_id: str,
+    name: str,
+    fat: float,
+    water: float,
+    sucrose: float,
+    glucose: float,
+    fructose: float,
+    fiber: float,
+    other_solids: float,
+    brix: float = 0.0,
+) -> Ingredient:
+    """Create a fruit or purée ingredient from per-100 g composition data.
+
+    Glucose is mapped to the model's dextrose component because both describe
+    D-glucose for POD/PAC purposes. A water value of zero asks the model to infer
+    water by difference. Any positive rounding gap is assigned to other solids.
+    Brix is recorded as provenance but is not used as a substitute for the entered
+    sugar split.
+
+    Raises:
+        ValueError: If values are negative, Brix is outside 0–100, the name is
+            blank, or declared components exceed 100 g.
+    """
+
+    values = {
+        "fat": fat,
+        "water": water,
+        "sucrose": sucrose,
+        "glucose": glucose,
+        "fructose": fructose,
+        "fiber": fiber,
+        "other_solids": other_solids,
+        "brix": brix,
+    }
+    negative = {key: value for key, value in values.items() if value < 0}
+    if negative:
+        key, value = next(iter(negative.items()))
+        raise ValueError(f"{key} must be non-negative; got {value!r}.")
+    if brix > 100:
+        raise ValueError(f"Brix must be between 0 and 100; got {brix!r}.")
+    if not name.strip():
+        raise ValueError("Fruit or purée name cannot be blank.")
+
+    declared_without_water = fat + sucrose + glucose + fructose + fiber + other_solids
+    resolved_water = 100.0 - declared_without_water if water == 0 else water
+    total = declared_without_water + resolved_water
+    if total > 100.5:
+        raise ValueError(
+            f"Declared components total {total:.1f} g per 100 g; expected at most 100 g."
+        )
+    resolved_other_solids = other_solids + max(0.0, 100.0 - total)
+    brix_note = f" Entered Brix: {brix:g} °Bx." if brix else ""
+    return Ingredient(
+        ingredient_id=ingredient_id,
+        name=name.strip(),
+        category="Fruit & purée",
+        components={
+            "fat": fat,
+            "sucrose": sucrose,
+            "dextrose": glucose,
+            "fructose": fructose,
+            "fiber": fiber,
+            "other_solids": resolved_other_solids,
+            "water": resolved_water,
+        },
+        note=(
+            "User-supplied fruit composition. Glucose is modeled with the dextrose "
+            "POD/PAC factors. Fiber contributes to total solids, but its water binding "
+            f"and particle texture are not predicted.{brix_note}"
         ),
         custom=True,
     )
@@ -813,11 +1094,13 @@ def ingredient_from_composition(
     msnf: float,
     soluble_component: str,
     soluble_amount: float,
+    fiber: float,
     other_solids: float,
     salt: float,
     alcohol: float,
     gums: float,
     water: float,
+    category: str = "Custom",
 ) -> Ingredient:
     """Create a custom ingredient from direct component assignments per 100 g.
 
@@ -832,6 +1115,7 @@ def ingredient_from_composition(
         "fat": fat,
         "msnf": msnf,
         "soluble_amount": soluble_amount,
+        "fiber": fiber,
         "other_solids": other_solids,
         "salt": salt,
         "alcohol": alcohol,
@@ -847,7 +1131,9 @@ def ingredient_from_composition(
     if not name.strip():
         raise ValueError("Custom ingredient name cannot be blank.")
 
-    declared_without_water = fat + msnf + soluble_amount + other_solids + salt + alcohol + gums
+    declared_without_water = (
+        fat + msnf + soluble_amount + fiber + other_solids + salt + alcohol + gums
+    )
     resolved_water = 100.0 - declared_without_water if water == 0 else water
     total = declared_without_water + resolved_water
     if total > 100.5:
@@ -858,11 +1144,12 @@ def ingredient_from_composition(
     return Ingredient(
         ingredient_id=ingredient_id,
         name=name.strip(),
-        category="Custom",
+        category=category,
         components={
             "fat": fat,
             "msnf": msnf,
             soluble_component: soluble_amount,
+            "fiber": fiber,
             "other_solids": resolved_other_solids,
             "salt": salt,
             "alcohol": alcohol,
@@ -874,17 +1161,38 @@ def ingredient_from_composition(
     )
 
 
-def target_ranges(target_set: str, *, fat_cap: float = 15.0) -> dict[str, tuple[float, float]]:
+def target_ranges(
+    target_set: str,
+    *,
+    fat_cap: float = 15.0,
+) -> dict[str, tuple[float, float] | None]:
     """Return display target ranges for the active production method."""
 
+    if target_set not in TARGET_PROFILE_INFO:
+        expected = ", ".join(TARGET_PROFILE_INFO)
+        raise ValueError(f"Unknown target profile {target_set!r}; expected one of: {expected}.")
+    if target_set == "Fruit sorbet · experimental":
+        return {
+            "fat_pct": None,
+            "msnf_pct": None,
+            "modeled_sugars_pct": None,
+            "nonfat_solids_pct": (25.0, 33.0),
+            "total_solids_pct": (25.0, 33.0),
+            "water_pct": (67.0, 75.0),
+            "fiber_pct": None,
+            "gums_pct": None,
+            "pod": (140.0, 200.0),
+            "pac": (300.0, 340.0),
+        }
     pac_range = (245.0, 255.0) if target_set == "Creami / Pacojet" else (220.0, 230.0)
     return {
         "fat_pct": (12.0, fat_cap),
         "msnf_pct": (10.0, 12.0),
-        "added_sugars_pct": (11.0, 14.0),
+        "modeled_sugars_pct": (11.0, 14.0),
         "nonfat_solids_pct": (22.0, 25.0),
         "total_solids_pct": (37.0, 42.0),
         "water_pct": (58.0, 63.0),
+        "fiber_pct": None,
         "gums_pct": (0.15, 0.20),
         "pod": (110.0, 120.0),
         "pac": pac_range,

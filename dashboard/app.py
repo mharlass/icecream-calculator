@@ -7,6 +7,7 @@ from pathlib import Path
 from model import (
     BASE_PRESET_INFO,
     SOLUBLE_COMPONENT_LABELS,
+    TARGET_PROFILE_INFO,
     FormulationError,
     Ingredient,
     RecipeLine,
@@ -16,16 +17,19 @@ from model import (
     default_library,
     diagnose_recipe,
     ingredient_from_composition,
+    ingredient_from_fruit_composition,
     ingredient_from_nutrition_label,
     ingredient_pac_coefficient,
     ingredient_pod_coefficient,
+    optimize_recipe,
     scale_recipe,
-    solve_recipe,
     target_ranges,
 )
 from shiny import App, Inputs, Outputs, Session, reactive, render, ui
 
 APP_DIR = Path(__file__).parent
+APP_VERSION = "0.2.0"
+REPOSITORY_URL = "https://github.com/mharlass/icecream-calculator"
 MAX_RECIPE_ROWS = 24
 BATCH_MASSES = {
     "deluxe": 709.0,
@@ -65,6 +69,52 @@ def page_intro(eyebrow: str, title: str, description: str) -> ui.Tag:
         ui.h1(title),
         ui.p(description, class_="page-lede"),
         class_="page-intro",
+    )
+
+
+def app_footer() -> ui.Tag:
+    """Return the application-wide project note and links."""
+
+    return ui.tags.footer(
+        ui.div(
+            ui.div(
+                ui.div(f"Ice Cream Formula Calculator · v{APP_VERSION}", class_="footer-title"),
+                ui.p(
+                    "I am learning ice-cream formulation as I go, so treat the numbers here "
+                    "as a starting point rather than settled advice. The app is still taking "
+                    "shape, and corrections or suggestions are genuinely useful."
+                ),
+            ),
+            ui.div(
+                ui.tags.a(
+                    "GitHub",
+                    href=REPOSITORY_URL,
+                    target="_blank",
+                    rel="noopener noreferrer",
+                ),
+                ui.tags.a(
+                    "Feedback & issues",
+                    href=f"{REPOSITORY_URL}/issues",
+                    target="_blank",
+                    rel="noopener noreferrer",
+                ),
+                ui.tags.a(
+                    "Changelog",
+                    href=f"{REPOSITORY_URL}/blob/main/CHANGELOG.md",
+                    target="_blank",
+                    rel="noopener noreferrer",
+                ),
+                ui.tags.a(
+                    "MIT license",
+                    href=f"{REPOSITORY_URL}/blob/main/LICENSE",
+                    target="_blank",
+                    rel="noopener noreferrer",
+                ),
+                class_="footer-links",
+            ),
+            class_="app-footer-inner",
+        ),
+        class_="app-footer",
     )
 
 
@@ -124,11 +174,11 @@ def landing_page() -> ui.Tag:
         ui.tags.section(
             ui.div(
                 ui.div("Ice cream recipe calculator", class_="eyebrow"),
-                ui.h1("Balance the recipe before you freeze it."),
+                ui.h1("Create the recipe"),
                 ui.p(
-                    "Choose a starting base, set the batch size, and adjust ingredients by "
-                    "weight. The calculator updates fat, sweetness, freezing behavior, and "
-                    "solids as you work.",
+                    "Choose an ice-cream or sorbet base, set the batch size, and adjust "
+                    "ingredients by weight. The calculator updates sweetness, freezing "
+                    "behavior, water, fat, fiber, and solids as you work.",
                     class_="home-lede",
                 ),
                 ui.div(
@@ -145,7 +195,10 @@ def landing_page() -> ui.Tag:
                     class_="home-actions",
                 ),
                 ui.p(
-                    "Default: no-cook dairy base · Ninja CREAMi Deluxe tub · 709 ml",
+                    "Default: no-cook dairy base · Ninja CREAMi Deluxe tub · 709 ml. "
+                    "CREAMi and Pacojet profiles are intended for machines that process a "
+                    "fully frozen container and can work well with lower-fat recipes than "
+                    "traditional churned ice cream.",
                     class_="default-note",
                 ),
                 class_="home-copy",
@@ -184,7 +237,9 @@ def landing_page() -> ui.Tag:
                     ui.span("1"),
                     ui.div(
                         ui.h3("Choose a base and batch size"),
-                        ui.p("Load a no-cook, cooked, yolk, or whole-egg starting formula."),
+                        ui.p(
+                            "Load a dairy, custard, or fruit-sorbet starting formula."
+                        ),
                     ),
                 ),
                 ui.tags.li(
@@ -199,7 +254,7 @@ def landing_page() -> ui.Tag:
                     ui.div(
                         ui.h3("Compare with your targets"),
                         ui.p(
-                            "Use the sliders as goals, or let the optional solver rebalance five rows."
+                            "Use the sliders as goals, or optimize any selected ingredient rows."
                         ),
                     ),
                 ),
@@ -215,6 +270,9 @@ def builder_page() -> ui.Tag:
     """Return the main recipe-building page."""
 
     base_choices = {preset_id: info["name"] for preset_id, info in BASE_PRESET_INFO.items()}
+    target_choices = {
+        profile_id: info["name"] for profile_id, info in TARGET_PROFILE_INFO.items()
+    }
     return ui.div(
         page_intro(
             "Calculator",
@@ -222,8 +280,134 @@ def builder_page() -> ui.Tag:
             "Load a starting point, then work directly in the ingredient list. The balance "
             "panel stays visible and updates when a quantity changes.",
         ),
-        ui.tags.section(
+        ui.tags.details(
+            ui.tags.summary(
+                ui.div(
+                    ui.div("Optional", class_="eyebrow"),
+                    ui.h2("Optimize selected ingredient weights"),
+                ),
+                ui.span("Open controls", class_="details-action"),
+            ),
             ui.div(
+                ui.p(
+                    "Batch mass stays fixed. Mark the ingredients the optimizer may change, "
+                    "then choose the targets it should pursue. Any number of ingredient rows "
+                    "may be selected. If the combination cannot meet every target, the closest "
+                    "nonnegative formula is returned and the remaining gaps are reported."
+                ),
+                ui.div(
+                    ui.panel_conditional(
+                        "input.target_profile !== 'Fruit sorbet · experimental'",
+                        ui.div(
+                            ui.input_checkbox(
+                                "optimize_fat",
+                                "Include fat",
+                                value=True,
+                            ),
+                            ui.input_slider(
+                                "target_fat",
+                                "Fat target · %",
+                                min=0,
+                                max=20,
+                                value=13.5,
+                                step=0.1,
+                            ),
+                            ui.p("Richness and body.", class_="control-help"),
+                            class_="optimizer-target",
+                        ),
+                    ),
+                    ui.panel_conditional(
+                        "input.target_profile !== 'Fruit sorbet · experimental'",
+                        ui.div(
+                            ui.input_checkbox(
+                                "optimize_msnf",
+                                "Include milk solids-not-fat",
+                                value=True,
+                            ),
+                            ui.input_numeric(
+                                "target_msnf",
+                                "Milk solids-not-fat target · %",
+                                value=11.5,
+                                min=0,
+                                max=20,
+                                step=0.1,
+                                width="100%",
+                            ),
+                            ui.p("Milk proteins, lactose, and minerals.", class_="control-help"),
+                            class_="optimizer-target",
+                        ),
+                    ),
+                    ui.div(
+                        ui.input_checkbox(
+                            "optimize_solids",
+                            "Include total solids",
+                            value=True,
+                        ),
+                        ui.input_slider(
+                            "target_solids",
+                            "Total solids target · %",
+                            min=20,
+                            max=45,
+                            value=39,
+                            step=0.5,
+                        ),
+                        ui.p(
+                            "Fat, sugars, milk solids, fruit, fiber, and other solids.",
+                            class_="control-help",
+                        ),
+                        class_="optimizer-target",
+                    ),
+                    ui.div(
+                        ui.input_checkbox(
+                            "optimize_pod",
+                            "Include sweetness",
+                            value=True,
+                        ),
+                        ui.input_slider(
+                            "target_pod",
+                            "Sweetness target · POD",
+                            min=70,
+                            max=240,
+                            value=112,
+                            step=1,
+                        ),
+                        ui.p("Higher means sweeter.", class_="control-help"),
+                        class_="optimizer-target",
+                    ),
+                    ui.div(
+                        ui.input_checkbox(
+                            "optimize_pac",
+                            "Include freeze softness",
+                            value=True,
+                        ),
+                        ui.input_slider(
+                            "target_pac",
+                            "Freeze softness target · PAC",
+                            min=180,
+                            max=380,
+                            value=248,
+                            step=1,
+                        ),
+                        ui.p("Higher generally freezes softer.", class_="control-help"),
+                        class_="optimizer-target",
+                    ),
+                    class_="target-slider-grid",
+                ),
+                ui.div(
+                    ui.input_action_button(
+                        "solve_formula",
+                        ui.span(icon("spark"), "Optimize selected rows"),
+                        class_="button button-primary",
+                    ),
+                    class_="solver-actions",
+                ),
+                ui.output_ui("solver_status"),
+                class_="solver-content",
+            ),
+            class_="surface solver-surface",
+        ),
+        ui.div(
+            ui.tags.section(
                 ui.div(
                     ui.div("1", class_="step-number"),
                     ui.div(
@@ -265,11 +449,8 @@ def builder_page() -> ui.Tag:
                     ),
                     ui.input_select(
                         "target_profile",
-                        "Freezing method",
-                        choices={
-                            "Creami / Pacojet": "CREAMi or Pacojet",
-                            "Churned machine": "Churned ice-cream machine",
-                        },
+                        "Recipe target",
+                        choices=target_choices,
                         selected="Creami / Pacojet",
                         width="100%",
                     ),
@@ -294,148 +475,68 @@ def builder_page() -> ui.Tag:
                     "starting mass in grams. Weigh the mix and never fill above the tub's MAX line.",
                     class_="field-note",
                 ),
+                class_="surface setup-surface",
             ),
-            class_="surface setup-surface",
-        ),
-        ui.div(
-            ui.tags.main(
-                ui.tags.section(
-                    ui.div(
-                        ui.div(
-                            ui.div("2", class_="step-number"),
-                            ui.div(
-                                ui.h2("Edit the ingredients"),
-                                ui.p(
-                                    "All quantities are grams in the complete batch. Ingredient "
-                                    "choices are grouped by their role in the recipe."
-                                ),
-                            ),
-                            class_="section-heading",
-                        ),
-                        class_="section-heading-row",
-                    ),
-                    ui.output_ui("formula_table"),
-                    ui.div(
-                        ui.div(
-                            ui.input_selectize(
-                                "add_ingredient",
-                                "Add an ingredient",
-                                choices={},
-                                width="100%",
-                                options={"placeholder": "Search by name or browse a group"},
-                            ),
-                            class_="add-field add-field-wide",
-                        ),
-                        ui.div(
-                            ui.input_numeric(
-                                "add_grams",
-                                "Quantity · g",
-                                value=10,
-                                min=0,
-                                step=0.1,
-                                width="100%",
-                            ),
-                            class_="add-field",
-                        ),
-                        ui.input_action_button(
-                            "add_line",
-                            ui.span(icon("plus"), "Add"),
-                            class_="button button-secondary add-button",
-                        ),
-                        class_="add-ingredient-bar",
-                    ),
-                    class_="surface formula-surface",
-                ),
-                ui.tags.details(
-                    ui.tags.summary(
-                        ui.div(
-                            ui.div("Optional", class_="eyebrow"),
-                            ui.h2("Balance five ingredient weights automatically"),
-                        ),
-                        ui.span("Open controls", class_="details-action"),
-                    ),
-                    ui.div(
-                        ui.p(
-                            "The solver changes only rows marked “Auto-adjust.” A starting base "
-                            "already marks milk, cream, milk powder, sucrose, and dextrose. "
-                            "Exactly five rows must remain selected."
-                        ),
-                        ui.div(
-                            ui.div(
-                                ui.input_slider(
-                                    "target_fat",
-                                    "Fat target · %",
-                                    min=5,
-                                    max=20,
-                                    value=13.5,
-                                    step=0.1,
-                                ),
-                                ui.p("Richness and body.", class_="control-help"),
-                            ),
-                            ui.div(
-                                ui.input_slider(
-                                    "target_pod",
-                                    "Sweetness target · POD",
-                                    min=70,
-                                    max=160,
-                                    value=112,
-                                    step=1,
-                                ),
-                                ui.p("Higher means sweeter.", class_="control-help"),
-                            ),
-                            ui.div(
-                                ui.input_slider(
-                                    "target_pac",
-                                    "Freeze softness target · PAC",
-                                    min=180,
-                                    max=300,
-                                    value=248,
-                                    step=1,
-                                ),
-                                ui.p("Higher generally freezes softer.", class_="control-help"),
-                            ),
-                            class_="target-slider-grid",
-                        ),
-                        ui.div(
-                            ui.input_numeric(
-                                "target_msnf",
-                                "Milk solids-not-fat target · %",
-                                value=11.5,
-                                min=0,
-                                max=20,
-                                step=0.1,
-                                width="220px",
-                            ),
-                            ui.input_action_button(
-                                "solve_formula",
-                                ui.span(icon("spark"), "Balance selected rows"),
-                                class_="button button-primary",
-                            ),
-                            class_="solver-actions",
-                        ),
-                        ui.output_ui("solver_status"),
-                        class_="solver-content",
-                    ),
-                    class_="surface solver-surface",
-                ),
-                class_="builder-main",
-            ),
-            ui.tags.aside(
+            ui.tags.section(
                 ui.div(
                     ui.div(
-                        ui.div("3", class_="step-number"),
+                        ui.div("2", class_="step-number"),
                         ui.div(
-                            ui.h2("Check the balance"),
-                            ui.p("Current values are compared with the three target sliders."),
+                            ui.h2("Edit the ingredients"),
+                            ui.p(
+                                "All quantities are grams in the complete batch. Ingredient "
+                                "choices are grouped by their role in the recipe."
+                            ),
                         ),
                         class_="section-heading",
                     ),
-                    ui.output_ui("results_panel"),
-                    class_="surface result-surface",
+                    class_="section-heading-row",
                 ),
-                class_="builder-aside",
+                ui.output_ui("formula_table"),
+                ui.div(
+                    ui.div(
+                        ui.input_selectize(
+                            "add_ingredient",
+                            "Add an ingredient",
+                            choices={},
+                            width="100%",
+                            options={"placeholder": "Search by name or browse a group"},
+                        ),
+                        class_="add-field add-field-wide",
+                    ),
+                    ui.div(
+                        ui.input_numeric(
+                            "add_grams",
+                            "Quantity · g",
+                            value=10,
+                            min=0,
+                            step=0.1,
+                            width="100%",
+                        ),
+                        class_="add-field",
+                    ),
+                    ui.input_action_button(
+                        "add_line",
+                        ui.span(icon("plus"), "Add"),
+                        class_="button button-secondary add-button",
+                    ),
+                    class_="add-ingredient-bar",
+                ),
+                class_="surface formula-surface",
             ),
-            class_="builder-grid",
+            ui.tags.aside(
+                ui.div(
+                    ui.div("3", class_="step-number"),
+                    ui.div(
+                        ui.h2("Check the balance"),
+                        ui.p("Current values are compared with the active recipe targets."),
+                    ),
+                    class_="section-heading",
+                ),
+                ui.output_ui("results_panel"),
+                class_="surface result-surface",
+            ),
+            class_="builder-steps-grid",
         ),
         ui.tags.section(
             ui.div("Glossary", class_="eyebrow"),
@@ -468,7 +569,15 @@ def builder_page() -> ui.Tag:
                 term_row(
                     "Total solids",
                     "everything except water",
-                    "Fat, milk solids, sugars, egg solids, cocoa, stabilizers, and other declared solids.",
+                    "Fat, milk solids, sugars, fiber, egg solids, cocoa, stabilizers, and "
+                    "other declared solids.",
+                ),
+                term_row(
+                    "Fiber",
+                    "declared dietary fiber",
+                    "Counts toward total solids and may affect body and water mobility. The "
+                    "effect depends on source, solubility, and particle size, so the calculator "
+                    "does not turn fiber grams into a texture score.",
                 ),
                 class_="glossary-grid",
             ),
@@ -492,13 +601,128 @@ def ingredient_page() -> ui.Tag:
         page_intro(
             "Ingredients",
             "Match the product you actually use",
-            "The built-in library is a starting point. Add a local cream, milk, syrup, "
-            "chocolate, or other product when its label differs.",
+            "The built-in library is a starting point. Fruit ripeness and chocolate "
+            "formulations vary, so use measured data or the product label when possible.",
+        ),
+        ui.div(
+            ui.tags.section(
+                ui.div("Fruit or purée", class_="eyebrow"),
+                ui.h2("Describe the fruit"),
+                ui.p(
+                    "Water drives ice formation. The sucrose, glucose, and fructose split "
+                    "changes both sweetness and freezing behavior. Fiber and other solids "
+                    "add body, but their water binding and particle texture are not predicted."
+                ),
+                ui.input_text(
+                    "fruit_name",
+                    "Ingredient name",
+                    placeholder="For example: ripe strawberry purée",
+                    width="100%",
+                ),
+                ui.div(
+                    ui.input_numeric(
+                        "fruit_water", "Water · g", 90.8, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_sucrose", "Sucrose · g", 0, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_glucose", "Glucose · g", 2.24, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_fructose", "Fructose · g", 2.62, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_fiber", "Fiber · g", 0, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_fat", "Fat · g", 0.22, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_other", "Other solids · g", 4.12, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "fruit_brix", "Measured °Brix · optional", 0, min=0, max=100, step=0.1
+                    ),
+                    class_="guided-input-grid",
+                ),
+                ui.p(
+                    "Reference values are USDA means for raw strawberries. Fiber is 0 only "
+                    "because that record does not report it and is included in residual other "
+                    "solids. °Brix is not substituted for the entered sugar composition.",
+                    class_="field-note",
+                ),
+                ui.input_action_button(
+                    "save_fruit",
+                    ui.span(icon("plus"), "Add fruit or purée"),
+                    class_="button button-primary",
+                ),
+                ui.output_ui("fruit_status"),
+                class_="surface guided-ingredient-card fruit-card",
+            ),
+            ui.tags.section(
+                ui.div("Chocolate or cocoa", class_="eyebrow"),
+                ui.h2("Use the package label"),
+                ui.p(
+                    "Cocoa butter raises fat. Sugar changes POD and PAC. Cocoa solids, "
+                    "protein, and fiber raise total solids and body. Particle size, cocoa "
+                    "butter crystallization, and emulsification remain outside the model."
+                ),
+                ui.input_text(
+                    "chocolate_name",
+                    "Ingredient name",
+                    placeholder="For example: 70% dark couverture",
+                    width="100%",
+                ),
+                ui.div(
+                    ui.input_numeric(
+                        "chocolate_fat", "Fat · g", 0, min=0, max=100, step=0.1
+                    ),
+                    ui.input_numeric(
+                        "chocolate_carbohydrate",
+                        "Carbohydrate · g",
+                        0,
+                        min=0,
+                        max=100,
+                        step=0.1,
+                    ),
+                    ui.input_numeric(
+                        "chocolate_sugars", "of which sugars · g", 0, min=0, max=100, step=0.1
+                    ),
+                    ui.input_numeric(
+                        "chocolate_fiber", "Fiber · g", 0, min=0, max=100, step=0.1
+                    ),
+                    ui.input_numeric(
+                        "chocolate_protein", "Protein · g", 0, min=0, max=100, step=0.1
+                    ),
+                    ui.input_numeric(
+                        "chocolate_salt", "Salt · g", 0, min=0, max=100, step=0.01
+                    ),
+                    ui.input_numeric(
+                        "chocolate_water", "Water · g", 0, min=0, max=100, step=0.1
+                    ),
+                    class_="guided-input-grid",
+                ),
+                ui.p(
+                    "Leave water at 0 to infer it by difference. Label sugars are modeled "
+                    "as sucrose. Use direct composition below if the manufacturer supplies "
+                    "a more precise sugar or water analysis.",
+                    class_="field-note",
+                ),
+                ui.input_action_button(
+                    "save_chocolate",
+                    ui.span(icon("plus"), "Add chocolate or cocoa"),
+                    class_="button button-primary",
+                ),
+                ui.output_ui("chocolate_status"),
+                class_="surface guided-ingredient-card chocolate-card",
+            ),
+            class_="guided-ingredient-grid",
         ),
         ui.tags.section(
             ui.div(
-                ui.div("Custom ingredient", class_="eyebrow"),
-                ui.h2("Enter values per 100 g"),
+                ui.div("Other ingredient", class_="eyebrow"),
+                ui.h2("Enter another product per 100 g"),
                 ui.p(
                     "Use nutrition-label mode for ordinary products. Use direct composition "
                     "when you know the milk-solids, alcohol, gum, or sugar component."
@@ -583,6 +807,9 @@ def ingredient_page() -> ui.Tag:
                         min=0,
                         max=100,
                         step=0.1,
+                    ),
+                    ui.input_numeric(
+                        "direct_fiber", "Fiber · g", 0, min=0, max=100, step=0.1
                     ),
                     ui.input_numeric(
                         "direct_other",
@@ -1146,6 +1373,7 @@ def method_page() -> ui.Tag:
                 ui.tags.a("No-cook base", href="#no-cook"),
                 ui.tags.a("Cooked egg-free base", href="#cooked"),
                 ui.tags.a("Egg custard", href="#custard"),
+                ui.tags.a("Fruit sorbet", href="#sorbet"),
                 ui.tags.a("CREAMi processing", href="#creami"),
                 ui.tags.a("Sources", href="#sources"),
                 class_="method-toc",
@@ -1180,6 +1408,56 @@ def method_page() -> ui.Tag:
                             "line. Freeze level for at least 24 hours.",
                         ),
                         class_="method-list",
+                    ),
+                    class_="method-section",
+                ),
+                ui.tags.section(
+                    ui.div("Dairy-free base", class_="eyebrow"),
+                    ui.h2("Fruit sorbet", id="sorbet"),
+                    ui.p(
+                        "Fruit sorbet is balanced around water, total solids, individual "
+                        "sugars, POD, and PAC. Fat is measured rather than targeted, and MSNF "
+                        "does not apply. The experimental profile is a starting guide because "
+                        "fruit, acidity, freezer temperature, and machine behavior all vary."
+                    ),
+                    ui.tags.ol(
+                        process_step(
+                            "1",
+                            "Check the fruit",
+                            "Use the composition of the actual purée when available. A measured "
+                            "Brix helps identify a sweeter or more dilute batch, but it does not "
+                            "replace water and sugar-species data.",
+                        ),
+                        process_step(
+                            "2",
+                            "Disperse and blend",
+                            "Mix the dry sugars, inulin, salt, and stabilizers before blending "
+                            "them into the fruit and water. Follow each stabilizer's hydration "
+                            "requirements.",
+                        ),
+                        process_step(
+                            "3",
+                            "Rest cold",
+                            "Chill the mix and allow the stabilizers to hydrate. Recheck the "
+                            "batch mass if heating or straining removed water or pulp.",
+                        ),
+                        process_step(
+                            "4",
+                            "Freeze, test, and record",
+                            "Use the selected machine, record the freezer temperature and fruit "
+                            "Brix, then adjust one variable at a time in the next batch.",
+                        ),
+                        class_="method-list",
+                    ),
+                    ui.div(
+                        icon("info"),
+                        ui.p(
+                            "Fiber is included in total solids, but the app does not predict "
+                            "water binding, viscosity, particle texture, or organic-acid PAC. "
+                            "Treat the optimized result as a starting point and verify it in a "
+                            "small test batch."
+                        ),
+                        class_="callout",
                     ),
                     class_="method-section",
                 ),
@@ -1332,6 +1610,30 @@ def method_page() -> ui.Tag:
                                 target="_blank",
                             )
                         ),
+                        ui.tags.li(
+                            ui.tags.a(
+                                "USDA FoodData Central: Foundation Foods",
+                                href="https://fdc.nal.usda.gov/Foundation_Foods_Documentation/",
+                                target="_blank",
+                            )
+                        ),
+                        ui.tags.li(
+                            ui.tags.a(
+                                "Underbelly: Sample Sorbet Recipe · Strawberry",
+                                href="https://under-belly.org/sample-sorbet-recipe/",
+                                target="_blank",
+                            )
+                        ),
+                        ui.tags.li(
+                            ui.tags.a(
+                                "Research note: sorbet, fruit, and chocolate formulation",
+                                href=(
+                                    f"{REPOSITORY_URL}/blob/main/research/"
+                                    "sorbet_and_complex_ingredients.md"
+                                ),
+                                target="_blank",
+                            )
+                        ),
                         class_="source-list",
                     ),
                     ui.p(
@@ -1362,6 +1664,7 @@ app_ui = ui.page_navbar(
                 "family=Nunito+Sans:wght@400;500;600;700;800&display=swap"
             ),
         ),
+        ui.include_js(APP_DIR / "app.js", method="inline"),
         ui.include_css(APP_DIR / "styles.css"),
     ),
     ui.nav_panel("Overview", landing_page(), value="start"),
@@ -1369,15 +1672,33 @@ app_ui = ui.page_navbar(
     ui.nav_panel("Ingredients", ingredient_page(), value="ingredients"),
     ui.nav_panel("Stabilizers & additives", additives_page(), value="additives"),
     ui.nav_panel("Process notes", method_page(), value="method"),
+    ui.nav_spacer(),
+    ui.nav_control(
+        ui.tags.a(
+            "GitHub",
+            href=REPOSITORY_URL,
+            target="_blank",
+            rel="noopener noreferrer",
+            class_="nav-project-link",
+        )
+    ),
+    ui.nav_control(
+        ui.div(
+            ui.span("Theme", class_="visually-hidden"),
+            ui.input_dark_mode(id="dark_mode"),
+            class_="theme-control",
+        )
+    ),
     title=ui.div(
-        ui.span("Ice Cream Formula", class_="brand-title"),
-        ui.tags.small("calculator"),
+        ui.span("Ice Cream", ui.tags.br(), "Formula Calculator", class_="brand-title"),
+        ui.tags.small(f"v{APP_VERSION}"),
         class_="brand",
     ),
     id="main_nav",
     selected="start",
     window_title="Ice Cream Formula Calculator",
     fluid=True,
+    footer=app_footer(),
     navbar_options=ui.navbar_options(position="static-top", collapsible=True),
 )
 
@@ -1388,10 +1709,22 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     recipe_state = reactive.Value(scale_recipe(base_recipe("no_cook"), BATCH_MASSES["deluxe"]))
     library_state = reactive.Value(default_library())
     solver_message = reactive.Value(
-        ("info", "The five standard dairy and sugar rows are selected for auto-adjustment.")
+        ("info", "The standard dairy and sugar rows are selected for auto-adjustment.")
     )
     custom_message = reactive.Value(
-        ("info", "Saved ingredients become available in every grouped ingredient selector.")
+        (
+            "info",
+            (
+                "Added ingredients are available until this page is reloaded. "
+                "Shinylive does not persist them yet."
+            ),
+        )
+    )
+    fruit_message = reactive.Value(
+        ("info", "Use a food database, supplier analysis, or measurements from the actual fruit.")
+    )
+    chocolate_message = reactive.Value(
+        ("info", "Package values are preferable because cocoa products vary substantially.")
     )
     custom_counter = reactive.Value(1)
 
@@ -1455,6 +1788,25 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     def _open_method() -> None:
         ui.update_navset("main_nav", selected="method", session=session)
 
+    @reactive.effect
+    @reactive.event(input.target_profile)
+    def _apply_profile_defaults() -> None:
+        profile = str(input.target_profile() or "Creami / Pacojet")
+        if profile == "Fruit sorbet · experimental":
+            ui.update_slider("target_solids", value=29.0, session=session)
+            ui.update_slider("target_pod", value=170, session=session)
+            ui.update_slider("target_pac", value=320, session=session)
+        elif profile == "Churned machine":
+            ui.update_slider("target_fat", value=13.5, session=session)
+            ui.update_numeric("target_msnf", value=11.5, session=session)
+            ui.update_slider("target_pod", value=112, session=session)
+            ui.update_slider("target_pac", value=225, session=session)
+        else:
+            ui.update_slider("target_fat", value=13.5, session=session)
+            ui.update_numeric("target_msnf", value=11.5, session=session)
+            ui.update_slider("target_pod", value=112, session=session)
+            ui.update_slider("target_pac", value=248, session=session)
+
     @render.ui
     def base_summary():
         preset_id = str(input.base_style() or "no_cook")
@@ -1495,10 +1847,10 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                         ui.input_numeric(
                             f"grams_{index}",
                             None,
-                            value=round(line.grams, 3),
+                            value=round(line.grams, 2),
                             min=0,
                             max=5000,
-                            step=0.1,
+                            step=0.01,
                             width="100%",
                             update_on="blur",
                         ),
@@ -1535,7 +1887,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                         ui.tags.span(
                             "?",
                             class_="help-dot",
-                            title="The optional solver may change rows marked Allow.",
+                            title="The optional optimizer may change rows marked Allow.",
                         ),
                     ),
                     ui.tags.th(ui.tags.span("Remove", class_="visually-hidden")),
@@ -1604,13 +1956,38 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
             return
         recipe_state.set(loaded)
         metrics = calculate_recipe(loaded, library_state.get())
+        current_profile = str(input.target_profile() or "Creami / Pacojet")
+        if preset_id == "strawberry_sorbet":
+            selected_profile = "Fruit sorbet · experimental"
+        elif current_profile == "Fruit sorbet · experimental":
+            selected_profile = "Creami / Pacojet"
+        else:
+            selected_profile = current_profile
+        ui.update_select(
+            "target_profile",
+            selected=selected_profile,
+            session=session,
+        )
         ui.update_slider("target_fat", value=round(metrics.fat_pct, 1), session=session)
         ui.update_slider("target_pod", value=round(metrics.pod), session=session)
         ui.update_slider("target_pac", value=round(metrics.pac), session=session)
-        ui.update_numeric("target_msnf", value=round(metrics.msnf_pct, 1), session=session)
-        solver_message.set(
-            ("info", "Base loaded. Five standard rows are available for auto-adjustment.")
+        ui.update_slider(
+            "target_solids",
+            value=round(metrics.total_solids_pct * 2) / 2,
+            session=session,
         )
+        ui.update_numeric("target_msnf", value=round(metrics.msnf_pct, 1), session=session)
+        if preset_id == "strawberry_sorbet":
+            solver_message.set(
+                (
+                    "info",
+                    "Sorbet loaded. Fruit, water, and three sugars are ready for optimization.",
+                )
+            )
+        else:
+            solver_message.set(
+                ("info", "Base loaded. The standard rows are available for auto-adjustment.")
+            )
         ui.notification_show(
             f"Loaded {BASE_PRESET_INFO[preset_id]['name']} at {metrics.total_mass:.0f} g.",
             type="message",
@@ -1638,25 +2015,70 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     @reactive.effect
     @reactive.event(input.solve_formula)
     def _solve_formula() -> None:
+        is_sorbet = input.target_profile() == "Fruit sorbet · experimental"
         try:
-            solved = solve_recipe(
+            result = optimize_recipe(
                 current_lines(),
                 library_state.get(),
                 Targets(
                     total_mass=selected_batch_mass(),
-                    fat_pct=float(input.target_fat() or 0),
-                    msnf_pct=float(input.target_msnf() or 0),
-                    pod=float(input.target_pod() or 0),
-                    pac=float(input.target_pac() or 0),
+                    fat_pct=(
+                        float(input.target_fat() or 0)
+                        if not is_sorbet and input.optimize_fat()
+                        else None
+                    ),
+                    msnf_pct=(
+                        float(input.target_msnf() or 0)
+                        if not is_sorbet and input.optimize_msnf()
+                        else None
+                    ),
+                    total_solids_pct=(
+                        float(input.target_solids() or 0) if input.optimize_solids() else None
+                    ),
+                    pod=float(input.target_pod() or 0) if input.optimize_pod() else None,
+                    pac=float(input.target_pac() or 0) if input.optimize_pac() else None,
                 ),
             )
         except (FormulationError, ValueError) as exc:
             solver_message.set(("error", str(exc)))
             return
-        recipe_state.set(solved)
-        solver_message.set(
-            ("success", "Balanced. The five selected quantities now meet the target equations.")
-        )
+        recipe_state.set(result.lines)
+        labels = {
+            "fat_pct": ("fat", " percentage points"),
+            "msnf_pct": ("milk solids-not-fat", " percentage points"),
+            "total_solids_pct": ("total solids", " percentage points"),
+            "pod": ("POD", ""),
+            "pac": ("PAC", ""),
+        }
+        exact_limits = {
+            "fat_pct": 0.05,
+            "msnf_pct": 0.05,
+            "total_solids_pct": 0.05,
+            "pod": 0.5,
+            "pac": 0.5,
+        }
+        remaining = [
+            f"{labels[name][0]} {error:+.1f}{labels[name][1]}"
+            for name, error in result.target_errors.items()
+            if abs(error) > exact_limits[name]
+        ]
+        if remaining:
+            solver_message.set(
+                (
+                    "info",
+                    "Closest fit found. Remaining target gaps: " + ", ".join(remaining) + ".",
+                )
+            )
+        else:
+            solver_message.set(
+                (
+                    "success",
+                    (
+                        f"Optimized {sum(line.free for line in result.lines)} selected "
+                        f"ingredient rows across {len(result.target_errors)} targets."
+                    ),
+                )
+            )
 
     @render.ui
     def solver_status():
@@ -1667,20 +2089,34 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     def results_panel():
         metrics = live_metrics()
         profile = str(input.target_profile() or "Creami / Pacojet")
+        is_sorbet = profile == "Fruit sorbet · experimental"
         fat_target = float(input.target_fat() or 13.5)
+        solids_target = float(input.target_solids() or 29.0)
         pod_target = float(input.target_pod() or 112)
         pac_target = float(input.target_pac() or 248)
         ranges = target_ranges(profile, fat_cap=18.0)
-        ranges["fat_pct"] = (max(0.0, fat_target - 1.0), fat_target + 1.0)
+        if is_sorbet:
+            ranges["total_solids_pct"] = (
+                max(0.0, solids_target - 2.0),
+                solids_target + 2.0,
+            )
+        else:
+            ranges["fat_pct"] = (max(0.0, fat_target - 1.0), fat_target + 1.0)
         ranges["pod"] = (pod_target - 5.0, pod_target + 5.0)
         ranges["pac"] = (pac_target - 5.0, pac_target + 5.0)
 
         target_notes: list[str] = []
-        if abs(metrics.fat_pct - fat_target) > 1.0:
+        if not is_sorbet and abs(metrics.fat_pct - fat_target) > 1.0:
             direction = "above" if metrics.fat_pct > fat_target else "below"
             target_notes.append(
                 f"Fat is {abs(metrics.fat_pct - fat_target):.1f} percentage points "
                 f"{direction} your target."
+            )
+        if is_sorbet and abs(metrics.total_solids_pct - solids_target) > 2.0:
+            direction = "above" if metrics.total_solids_pct > solids_target else "below"
+            target_notes.append(
+                f"Total solids are {abs(metrics.total_solids_pct - solids_target):.1f} "
+                f"percentage points {direction} your target."
             )
         if abs(metrics.pod - pod_target) > 5.0:
             direction = "sweeter than" if metrics.pod > pod_target else "less sweet than"
@@ -1693,7 +2129,10 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                 f"Freeze softness is {abs(metrics.pac - pac_target):.0f} PAC from target "
                 f"and is likely to run {direction}."
             )
-        warnings = [*target_notes, *diagnose_recipe(metrics, fat_cap=18.0)]
+        warnings = [
+            *target_notes,
+            *diagnose_recipe(metrics, fat_cap=18.0, target_set=profile),
+        ]
 
         def balance_card(
             label: str,
@@ -1730,24 +2169,38 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
         metric_specs = [
             ("Fat", "fat_pct", metrics.fat_pct, "%", 2),
             ("MSNF", "msnf_pct", metrics.msnf_pct, "%", 2),
-            ("Added sugars", "added_sugars_pct", metrics.added_sugars_pct, "%", 2),
+            (
+                "Modeled sugars",
+                "modeled_sugars_pct",
+                metrics.modeled_sugars_pct,
+                "%",
+                2,
+            ),
             ("Nonfat solids", "nonfat_solids_pct", metrics.nonfat_solids_pct, "%", 2),
             ("Total solids", "total_solids_pct", metrics.total_solids_pct, "%", 2),
             ("Water", "water_pct", metrics.water_pct, "%", 2),
+            ("Fiber", "fiber_pct", metrics.fiber_pct, "%", 2),
             ("Gums", "gums_pct", metrics.gums_pct, "%", 3),
             ("Sweetness · POD", "pod", metrics.pod, "", 1),
             ("Freeze softness · PAC", "pac", metrics.pac, "", 1),
         ]
         metric_rows = []
         for label, key, value, suffix, digits in metric_specs:
-            low, high = ranges[key]
-            status = "In range" if low <= value <= high else "Review"
-            status_class = "status-ok" if status == "In range" else "status-review"
+            guide = ranges[key]
+            if guide is None:
+                target_text = "N/A" if is_sorbet and key == "msnf_pct" else "Measured"
+                status = target_text
+                status_class = "status-info"
+            else:
+                low, high = guide
+                target_text = f"{low:g} to {high:g}{suffix}"
+                status = "In range" if low <= value <= high else "Review"
+                status_class = "status-ok" if status == "In range" else "status-review"
             metric_rows.append(
                 ui.tags.tr(
                     ui.tags.th(label, scope="row"),
                     ui.tags.td(f"{value:.{digits}f}{suffix}", class_="numeric"),
-                    ui.tags.td(f"{low:g} to {high:g}{suffix}", class_="numeric target-value"),
+                    ui.tags.td(target_text, class_="numeric target-value"),
                     ui.tags.td(ui.span(status, class_=f"status-pill {status_class}")),
                 )
             )
@@ -1786,6 +2239,46 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                 class_="result-banner result-banner-ready",
             )
 
+        primary_cards = (
+            (
+                balance_card(
+                    "Total solids",
+                    metrics.total_solids_pct,
+                    solids_target,
+                    "%",
+                    20,
+                    45,
+                    1,
+                ),
+                balance_card("Sweetness · POD", metrics.pod, pod_target, "", 100, 280, 0),
+                balance_card("Freeze softness · PAC", metrics.pac, pac_target, "", 240, 380, 0),
+            )
+            if is_sorbet
+            else (
+                balance_card("Fat", metrics.fat_pct, fat_target, "%", 5, 20, 1),
+                balance_card("Sweetness · POD", metrics.pod, pod_target, "", 70, 160, 0),
+                balance_card("Freeze softness · PAC", metrics.pac, pac_target, "", 180, 300, 0),
+            )
+        )
+        diagnostic_chips = [
+            ui.span(
+                f"Fiber: {metrics.fiber_pct:.2f}% of mix",
+                class_="diagnostic-chip",
+            ),
+            ui.span(
+                f"Glucose/dextrose: {metrics.dextrose_share_pct:.1f}% of modeled sugar",
+                class_="diagnostic-chip",
+            ),
+        ]
+        if not is_sorbet:
+            diagnostic_chips.insert(
+                0,
+                ui.span(
+                    f"Lactose: {metrics.lactose_water_pct:.2f}% of water",
+                    class_="diagnostic-chip",
+                ),
+            )
+
         return ui.TagList(
             ui.div(
                 ui.span("Current batch"),
@@ -1793,9 +2286,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                 class_="batch-total",
             ),
             ui.div(
-                balance_card("Fat", metrics.fat_pct, fat_target, "%", 5, 20, 1),
-                balance_card("Sweetness · POD", metrics.pod, pod_target, "", 70, 160, 0),
-                balance_card("Freeze softness · PAC", metrics.pac, pac_target, "", 180, 300, 0),
+                *primary_cards,
                 class_="balance-card-stack",
             ),
             summary,
@@ -1813,17 +2304,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                     ui.tags.tbody(*metric_rows),
                     class_="results-table",
                 ),
-                ui.div(
-                    ui.span(
-                        f"Lactose: {metrics.lactose_water_pct:.2f}% of water",
-                        class_="diagnostic-chip",
-                    ),
-                    ui.span(
-                        f"Dextrose: {metrics.dextrose_share_pct:.1f}% of added sugar",
-                        class_="diagnostic-chip",
-                    ),
-                    class_="diagnostic-row",
-                ),
+                ui.div(*diagnostic_chips, class_="diagnostic-row"),
                 class_="result-details",
             ),
             ui.tags.details(
@@ -1842,6 +2323,87 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                 ),
                 class_="result-details",
             ),
+        )
+
+    def store_custom_ingredient(ingredient: Ingredient) -> None:
+        """Add one session-local ingredient and refresh grouped selectors."""
+
+        stored_lines = current_lines()
+        library = dict(library_state.get())
+        library[ingredient.ingredient_id] = ingredient
+        recipe_state.set(stored_lines)
+        library_state.set(library)
+        custom_counter.set(custom_counter.get() + 1)
+        ui.update_selectize(
+            "add_ingredient",
+            choices=ingredient_choices(library),
+            selected=ingredient.ingredient_id,
+            session=session,
+        )
+
+    @reactive.effect
+    @reactive.event(input.save_fruit)
+    def _save_fruit() -> None:
+        counter = custom_counter.get()
+        ingredient_id = f"user_{counter}"
+        try:
+            ingredient = ingredient_from_fruit_composition(
+                ingredient_id=ingredient_id,
+                name=str(input.fruit_name() or ""),
+                fat=float(input.fruit_fat() or 0),
+                water=float(input.fruit_water() or 0),
+                sucrose=float(input.fruit_sucrose() or 0),
+                glucose=float(input.fruit_glucose() or 0),
+                fructose=float(input.fruit_fructose() or 0),
+                fiber=float(input.fruit_fiber() or 0),
+                other_solids=float(input.fruit_other() or 0),
+                brix=float(input.fruit_brix() or 0),
+            )
+        except ValueError as exc:
+            fruit_message.set(("error", str(exc)))
+            return
+        store_custom_ingredient(ingredient)
+        fruit_message.set(
+            (
+                "success",
+                (
+                    f"Added {ingredient.name} for this browser session. "
+                    "It is now selected in the calculator's add-ingredient control."
+                ),
+            )
+        )
+
+    @reactive.effect
+    @reactive.event(input.save_chocolate)
+    def _save_chocolate() -> None:
+        counter = custom_counter.get()
+        ingredient_id = f"user_{counter}"
+        try:
+            ingredient = ingredient_from_nutrition_label(
+                ingredient_id=ingredient_id,
+                name=str(input.chocolate_name() or ""),
+                fat=float(input.chocolate_fat() or 0),
+                carbohydrate=float(input.chocolate_carbohydrate() or 0),
+                sugars=float(input.chocolate_sugars() or 0),
+                protein=float(input.chocolate_protein() or 0),
+                fibre=float(input.chocolate_fiber() or 0),
+                salt=float(input.chocolate_salt() or 0),
+                water=float(input.chocolate_water() or 0),
+                sugar_component="sucrose",
+                category="Chocolate & cocoa",
+            )
+        except ValueError as exc:
+            chocolate_message.set(("error", str(exc)))
+            return
+        store_custom_ingredient(ingredient)
+        chocolate_message.set(
+            (
+                "success",
+                (
+                    f"Added {ingredient.name} for this browser session. "
+                    "It is now selected in the calculator's add-ingredient control."
+                ),
+            )
         )
 
     @reactive.effect
@@ -1871,6 +2433,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                     msnf=float(input.direct_msnf() or 0),
                     soluble_component=str(input.direct_component() or "sucrose"),
                     soluble_amount=float(input.direct_component_amount() or 0),
+                    fiber=float(input.direct_fiber() or 0),
                     other_solids=float(input.direct_other() or 0),
                     salt=float(input.direct_salt() or 0),
                     alcohol=float(input.direct_alcohol() or 0),
@@ -1881,21 +2444,26 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
             custom_message.set(("error", str(exc)))
             return
 
-        stored_lines = current_lines()
-        library = dict(library_state.get())
-        library[ingredient_id] = ingredient
-        recipe_state.set(stored_lines)
-        library_state.set(library)
-        custom_counter.set(counter + 1)
+        store_custom_ingredient(ingredient)
         custom_message.set(
-            ("success", f"Added {ingredient.name}. It is now available in the calculator.")
+            (
+                "success",
+                (
+                    f"Added {ingredient.name} for this browser session. "
+                    "It is now available in the calculator."
+                ),
+            )
         )
-        ui.update_selectize(
-            "add_ingredient",
-            choices=ingredient_choices(library),
-            selected=ingredient_id,
-            session=session,
-        )
+
+    @render.ui
+    def fruit_status():
+        level, message = fruit_message.get()
+        return ui.div(message, class_=f"inline-status inline-status-{level}")
+
+    @render.ui
+    def chocolate_status():
+        level, message = chocolate_message.get()
+        return ui.div(message, class_=f"inline-status inline-status-{level}")
 
     @render.ui
     def custom_status():
@@ -1913,6 +2481,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                     ui.tags.td(f"{ingredient.component('fat'):.2f}", class_="numeric"),
                     ui.tags.td(f"{ingredient.component('msnf'):.2f}", class_="numeric"),
                     ui.tags.td(f"{ingredient.component('water'):.2f}", class_="numeric"),
+                    ui.tags.td(f"{ingredient.component('fiber'):.2f}", class_="numeric"),
                     ui.tags.td(f"{ingredient_pod_coefficient(ingredient):.3f}", class_="numeric"),
                     ui.tags.td(f"{ingredient_pac_coefficient(ingredient):.3f}", class_="numeric"),
                     ui.tags.td(ingredient.note or "Built-in assumption", class_="note-cell"),
@@ -1927,6 +2496,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                         ui.tags.th("Fat"),
                         ui.tags.th("MSNF"),
                         ui.tags.th("Water"),
+                        ui.tags.th("Fiber"),
                         ui.tags.th("POD/g"),
                         ui.tags.th("PAC/g"),
                         ui.tags.th("Note"),
