@@ -28,7 +28,7 @@ from model import (
 from shiny import App, Inputs, Outputs, Session, reactive, render, ui
 
 APP_DIR = Path(__file__).parent
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 REPOSITORY_URL = "https://github.com/mharlass/icecream-calculator"
 MAX_RECIPE_ROWS = 24
 BATCH_MASSES = {

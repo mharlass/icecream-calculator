@@ -4,12 +4,12 @@ All notable changes to Ice Cream Formula Calculator are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-31
+
 ### Added
 
 - `research/responsive_audit.md`, a measured record of open phone and tablet layout
   defects.
-- A README note recording why the Shinylive export stays on GitHub Actions rather than a
-  committed `docs/` folder.
 
 ### Changed
 
@@ -20,8 +20,12 @@ All notable changes to Ice Cream Formula Calculator are documented here.
 - Enlarged the navbar tabs from `0.8rem` to `0.95rem`.
 - Set the navbar brand to the full name "Ice Cream Formula Calculator" over two lines.
 - Reworded the footer project note.
-- Led the README with the hosted calculator link, separated from the repository
-  description by a rule.
+- Rewrote the README for people arriving from the hosted app: it now leads with the
+  calculator link, condenses the feature list to what a user gets from it, and shows the
+  repository layout as a file tree. Dropped the maintainer-facing sections. The validation
+  commands and the local Pages preview are already documented in `CONTRIBUTING.md` and
+  `AGENTS.md`; the one-time Pages setup steps and the note on why the Shinylive export is
+  not committed to a `docs/` folder are no longer recorded.
 
 ### Fixed
 
@@ -58,5 +62,6 @@ All notable changes to Ice Cream Formula Calculator are documented here.
 - Editable dairy and custard recipes, live composition metrics, and a five-variable solver.
 - Shinylive export and GitHub Pages deployment workflow.
 
+[0.2.1]: https://github.com/mharlass/icecream-calculator/releases/tag/v0.2.1
 [0.2.0]: https://github.com/mharlass/icecream-calculator/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mharlass/icecream-calculator/releases/tag/v0.1.0

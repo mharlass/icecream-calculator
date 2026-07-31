@@ -1,6 +1,6 @@
 [project]
 name = "icecream-formula-lab"
-version = "0.2.0"
+version = "0.2.1"
 description = "A science-based ice cream formulation dashboard for Ninja Creami and churned bases."
 readme = "README.md"
 requires-python = ">=3.12"
