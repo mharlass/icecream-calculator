@@ -126,6 +126,52 @@ Nothing is strained out. Every gram of the paste stays in.
 
 ---
 
+## How much heat this actually needs
+
+The 45-minute hold is inherited from the cardamom recipe, where it was the only thing
+generating emulsifier from the whey proteins. This formula has lecithin doing that job
+explicitly, so the hold is worth less here. Sorting what the heat buys:
+
+| Job | Needs heat? |
+|---|---|
+| Dissolve the kappa carrageenan | **Yes, ~70–80 °C.** Hard requirement. Minutes, not 45. |
+| Hydrate the CMC and guar | No. Both cold-hydrate; the age finishes the guar. |
+| Pasteurize | Effectively instant at 75 °C. |
+| Denature whey → water binding, body, less storage iciness | Yes, and it is the only real reason for the long hold. |
+
+**Keeping the kappa, the floor is 80 °C held about 10 minutes.** The cost is some whey
+denaturation: slightly less body, somewhat more iciness after weeks of storage. CMC carries
+storage recrystallization either way. For pistachio there is a flavor argument for the shorter
+cook — less cooked-milk character competing with the nut.
+
+## Gelatin instead of kappa carrageenan
+
+A clean swap, and it removes the only ingredient that forces high heat. Use **1.2 g gelatin**
+and take **guar down to 0.3 g**, since gelatin now supplies the frozen body the guar was
+sharing. Milk to 395 g to hold 700 g.
+
+> milk 395 g · cream 107 g · milk powder 29 g · sucrose 31 g · dextrose 37 g · inulin 6 g
+> · paste 90 g · lecithin 1.5 g · salt 1.4 g · **CMC 0.6 g · guar 0.3 g · gelatin 1.2 g**
+
+Fat 13.5% · MSNF 10.0% · total solids 41.1% · POD 114 · PAC 249. Identical to the kappa build —
+gelatin carries no POD or PAC.
+
+Gelatin dose and grade follow [cardamom-lime](cardamom-lime.md): weigh, never count sheets;
+1.2 g is about ¾ of a 1.67 g Dr. Oetker sheet at roughly 220–240 bloom.
+
+**Method changes.** Leave the gelatin out of the dry mix and bloom it in cold water. Blend the
+base cold, warm only to **65 °C**, stir in the squeezed gelatin, then the lecithin-loaded paste,
+homogenize hot for a full minute, and ice-bath. Never hold gelatin hot — a long 75 °C soak
+hydrolyzes it and costs gel strength.
+
+**What the swap gives up.** Kappa gels with milk calcium as soon as the mix cools and holds the
+nut solids suspended from that moment. Gelatin does not set until roughly 15–20 °C, leaving a
+window where paste can settle out. Chill fast and stir once or twice on the way down. The body
+also differs: kappa reads crisper and cuts cleanly, gelatin is chewier and more elastic. Gelatin
+is much more forgiving of an overdose than kappa is.
+
+---
+
 ## Why this build
 
 **Two fats, only one of which builds structure.** Pistachio fat is about 90% unsaturated and
