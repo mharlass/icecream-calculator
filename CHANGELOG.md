@@ -4,6 +4,12 @@ All notable changes to Ice Cream Formula Calculator are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `pistachio.md`, a worked pistachio recipe balanced with the calculator around a 100%
+  pistachio paste nutrition label. Untested. Records where it sits outside the target
+  windows and why, and the sensitivity of the balance to the label's sugar figure.
+
 ## [0.2.1] - 2026-07-31
 
 ### Added

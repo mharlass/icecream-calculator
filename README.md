@@ -73,6 +73,7 @@ Open <http://127.0.0.1:8000>.
 ├── .github/workflows/
 │   └── pages.yml          # GitHub Pages deployment
 ├── cardamom-lime.md       # Worked example recipe
+├── pistachio.md           # Worked example recipe
 └── pyproject.toml
 ```
 
