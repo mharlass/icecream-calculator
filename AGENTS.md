@@ -29,8 +29,10 @@ deploy on every push to `main`. Run the same three validation commands before co
   reactive state (`recipe_state`, `library_state`, and status-message values).
 - `dashboard/styles.css` — the visual system; `app.py` pulls it in with `ui.include_css`.
 - `tests/test_model.py` — engine only; the UI has no tests.
-- `cardamom-lime.md`, `research/` — a tested recipe and a cited evidence note that feeds the
-  additives tab. Prose deliverables, not code.
+- `cardamom-lime.md`, `chocolate-milk-ice-cream.md`, `research/` — worked recipes and cited
+  evidence notes that feed the additives tab. Prose deliverables, not code. The chocolate-milk
+  note also documents how to map a protein-enriched, intensely-sweetened dairy product onto
+  the component vocabulary, including why its lactose must not be entered as MSNF.
 
 Keep new formulation logic in `model.py` and keep it Shiny-free. That separation is what
 makes the arithmetic testable and is load-bearing for the browser build.
